@@ -2,11 +2,11 @@ import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 
 async function postToTcaSync(eventName: string, payload: unknown) {
   const url = process.env.TCA_SYNC_WEBHOOK_URL
-  const secret = process.env.TCA_SYNC_WEBHOOK_SECRET
+  const secret = process.env.TCA_MEDUSA_WEBHOOK_SECRET
 
   if (!url || !secret) {
     // Fail loudly so you notice misconfig in Medusa logs
-    throw new Error("Missing TCA_SYNC_WEBHOOK_URL or TCA_SYNC_WEBHOOK_SECRET")
+    throw new Error("Missing TCA_SYNC_WEBHOOK_URL or TCA_MEDUSA_WEBHOOK_SECRET")
   }
 
   const res = await fetch(url, {
