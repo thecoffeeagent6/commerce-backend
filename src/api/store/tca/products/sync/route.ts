@@ -97,42 +97,58 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     if (!existing) {
       console.log("[tca-sync] Creating product via workflow", { handle, title })
 
-      const { result } = await createProductsWorkflow(req.scope).run({
-        input: {
-          products: [
-            {
-              title,
-              handle,
-              status: isOrderable ? "published" : "draft",
-              metadata: {
-                tca_company_id: body.tca_company_id,
-                tca_menu_item_id: body.tca_menu_item_id,
-                tca_type: body.type ?? "menu_item",
-              },
-              options: [{ title: "Default", values: ["Default"] }],
-              variants: [
-                {
-                  title: "Default",
-                  options: { Default: "Default" },
-                  manage_inventory: inventoryFlags.manage_inventory,
-                  allow_backorder: inventoryFlags.allow_backorder,
-                  prices: [
-                    {
-                      amount: priceMinorUnits,
-                      currency_code: normalizedCurrency,
-                    },
-                  ],
-                },
-              ],
+      const workflowInput = {
+        products: [
+          {
+            title,
+            handle,
+            status: isOrderable ? ("published" as const) : ("draft" as const),
+            metadata: {
+              tca_company_id: body.tca_company_id,
+              tca_menu_item_id: body.tca_menu_item_id,
+              tca_type: body.type ?? "menu_item",
             },
-          ],
-        },
-      })
+            options: [{ title: "Default", values: ["Default"] }],
+            variants: [
+              {
+                title: "Default",
+                options: { Default: "Default" },
+                manage_inventory: inventoryFlags.manage_inventory,
+                allow_backorder: inventoryFlags.allow_backorder,
+                prices: [
+                  {
+                    amount: priceMinorUnits,
+                    currency_code: normalizedCurrency,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }
 
-      const created = (result as any[])?.[0]
+      console.log("[tca-sync] Workflow input:", JSON.stringify(workflowInput, null, 2))
+
+      let createResult: any
+      try {
+        const wfOutput = await createProductsWorkflow(req.scope).run({
+          input: workflowInput,
+        })
+        createResult = wfOutput.result
+        console.log("[tca-sync] Workflow result:", JSON.stringify(createResult, null, 2).slice(0, 1000))
+      } catch (wfErr) {
+        const detail = wfErr instanceof Error
+          ? { message: wfErr.message, stack: wfErr.stack }
+          : JSON.stringify(wfErr, null, 2)
+        console.error("[tca-sync] createProductsWorkflow threw:", detail)
+        throw wfErr
+      }
+
+      const created = Array.isArray(createResult) ? createResult[0] : createResult
       productId = created?.id
       variantId = created?.variants?.[0]?.id
       if (!productId || !variantId) {
+        console.error("[tca-sync] Missing IDs in result:", JSON.stringify(created, null, 2).slice(0, 500))
         throw new Error(
           "Product created but product/variant ID missing in response."
         )
@@ -240,8 +256,18 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       },
     })
   } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e)
-    console.error("[tca-sync] Sync failed", { error: errMsg, handle })
+    const errMsg = e instanceof Error
+      ? e.message
+      : typeof e === "object" && e !== null
+        ? JSON.stringify(e, null, 2)
+        : String(e)
+    const errStack = e instanceof Error ? e.stack : undefined
+    console.error("[tca-sync] Sync failed", {
+      error: errMsg,
+      stack: errStack,
+      rawType: typeof e,
+      handle,
+    })
     return res.status(502).json({
       message: "Failed syncing product to Medusa.",
       error: errMsg,
