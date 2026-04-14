@@ -1,4 +1,9 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
+import { Modules } from "@medusajs/framework/utils"
+import {
+  createProductsWorkflow,
+  updateProductsWorkflow,
+} from "@medusajs/medusa/core-flows"
 import TcaCompanyModuleService from "../../../../../modules/tca_company/service"
 import { TCA_COMPANY_MODULE } from "../../../../../modules/tca_company/constants"
 import { ensureProductTcaCompanyLink } from "../../../../../modules/tca_company/link-product"
@@ -17,17 +22,6 @@ type SyncBody = {
   is_orderable?: boolean
 }
 
-type AdminProduct = {
-  id: string
-  handle?: string
-  metadata?: Record<string, unknown>
-  variants?: Array<{ id: string }>
-}
-
-const REQUEST_TIMEOUT_MS = 20_000
-const MAX_RETRIES = 3
-const INITIAL_BACKOFF_MS = 400
-
 export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const body = req.body
 
@@ -42,42 +36,23 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     (req.headers["x-publishable-api-key"] as string | undefined) ?? ""
 
   if (publishableKey && receivedPk.trim() != publishableKey.trim()) {
-    console.warn("[tca-sync] Publishable key mismatch", {
-      expected_prefix: publishableKey.slice(0, 8) + "...",
-      received_prefix: receivedPk.slice(0, 8) + "...",
-    })
+    console.warn("[tca-sync] Publishable key mismatch")
     return res.status(401).json({ message: "Invalid publishable API key." })
   }
 
   if (!body?.tca_company_id || !body?.tca_menu_item_id || !body?.title) {
     console.warn("[tca-sync] Missing required fields in body")
     return res.status(400).json({
-      message: "Missing required fields: tca_company_id, tca_menu_item_id, title.",
-    })
-  }
-
-  const medusaBaseUrl = process.env.MEDUSA_BASE_URL || process.env.MEDUSA_BACKEND_URL
-  const adminToken = process.env.MEDUSA_ADMIN_API_TOKEN || process.env.MEDUSA_API_TOKEN
-  if (!medusaBaseUrl || !adminToken) {
-    console.error("[tca-sync] Env vars missing!", {
-      MEDUSA_BASE_URL: process.env.MEDUSA_BASE_URL ? "set" : "MISSING",
-      MEDUSA_BACKEND_URL: process.env.MEDUSA_BACKEND_URL ? "set" : "MISSING",
-      MEDUSA_ADMIN_API_TOKEN: process.env.MEDUSA_ADMIN_API_TOKEN ? "set" : "MISSING",
-      MEDUSA_API_TOKEN: process.env.MEDUSA_API_TOKEN ? "set" : "MISSING",
-    })
-    return res.status(500).json({
       message:
-        "Missing MEDUSA_BASE_URL/MEDUSA_BACKEND_URL or MEDUSA_ADMIN_API_TOKEN in environment.",
+        "Missing required fields: tca_company_id, tca_menu_item_id, title.",
     })
   }
-
-  console.log("[tca-sync] Env OK", {
-    baseUrl: medusaBaseUrl.slice(0, 30) + "...",
-    tokenPrefix: adminToken.slice(0, 6) + "...",
-  })
 
   const normalizedCurrency = (body.currency_code || "usd").toLowerCase()
-  const priceMinorUnits = Math.max(0, Math.round((body.price_amount ?? 0) * 100))
+  const priceMinorUnits = Math.max(
+    0,
+    Math.round((body.price_amount ?? 0) * 100)
+  )
   const quantity = Math.max(0, Number(body.inventory_quantity ?? 0))
   const inventoryEnabled = body.inventory_enabled === true
   const trackInventory = body.track_inventory === true
@@ -86,10 +61,20 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const title = body.title.trim()
 
   try {
-    const existing = await findByHandle(medusaBaseUrl, adminToken, handle)
+    const productService: any = req.scope.resolve(Modules.PRODUCT)
+
+    const existingProducts = await productService.listProducts(
+      { handle },
+      {
+        select: ["id", "handle", "metadata"],
+        relations: ["variants"],
+        take: 1,
+      }
+    )
+    const existing = existingProducts.length > 0 ? existingProducts[0] : null
+
     if (existing?.id) {
-      const meta = await fetchProductMetadata(medusaBaseUrl, adminToken, existing.id)
-      const existingCompany = meta?.tca_company_id
+      const existingCompany = existing.metadata?.tca_company_id
       if (
         existingCompany != null &&
         String(existingCompany).trim() !== body.tca_company_id.trim()
@@ -104,37 +89,96 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     let productId: string
     let variantId: string
 
+    const inventoryFlags = mapInventoryToVariantFlags(
+      inventoryEnabled,
+      trackInventory
+    )
+
     if (!existing) {
-      const created = await createProduct(medusaBaseUrl, adminToken, {
-        title,
-        handle,
-        type: body.type,
-        priceMinorUnits,
-        normalizedCurrency,
-        inventoryEnabled,
-        trackInventory,
-        quantity,
-        isOrderable,
-        tcaCompanyId: body.tca_company_id,
-        tcaMenuItemId: body.tca_menu_item_id,
+      console.log("[tca-sync] Creating product via workflow", { handle, title })
+
+      const { result } = await createProductsWorkflow(req.scope).run({
+        input: {
+          products: [
+            {
+              title,
+              handle,
+              status: isOrderable ? "published" : "draft",
+              metadata: {
+                tca_company_id: body.tca_company_id,
+                tca_menu_item_id: body.tca_menu_item_id,
+                tca_type: body.type ?? "menu_item",
+              },
+              options: [{ title: "Default", values: ["Default"] }],
+              variants: [
+                {
+                  title: "Default",
+                  options: { Default: "Default" },
+                  manage_inventory: inventoryFlags.manage_inventory,
+                  allow_backorder: inventoryFlags.allow_backorder,
+                  prices: [
+                    {
+                      amount: priceMinorUnits,
+                      currency_code: normalizedCurrency,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
       })
-      productId = created.productId
-      variantId = created.variantId
+
+      const created = (result as any[])?.[0]
+      productId = created?.id
+      variantId = created?.variants?.[0]?.id
+      if (!productId || !variantId) {
+        throw new Error(
+          "Product created but product/variant ID missing in response."
+        )
+      }
     } else {
-      const updated = await updateProduct(medusaBaseUrl, adminToken, existing, {
-        title,
-        type: body.type,
-        priceMinorUnits,
-        normalizedCurrency,
-        inventoryEnabled,
-        trackInventory,
-        quantity,
-        isOrderable,
-        tcaCompanyId: body.tca_company_id,
-        tcaMenuItemId: body.tca_menu_item_id,
+      console.log("[tca-sync] Updating product via workflow", {
+        productId: existing.id,
+        handle,
       })
-      productId = updated.productId
-      variantId = updated.variantId
+
+      productId = existing.id
+      variantId = existing.variants?.[0]?.id
+
+      if (!variantId) {
+        throw new Error("Existing product missing variant to update.")
+      }
+
+      await updateProductsWorkflow(req.scope).run({
+        input: {
+          products: [
+            {
+              id: existing.id,
+              title,
+              status: isOrderable ? "published" : "draft",
+              metadata: {
+                tca_company_id: body.tca_company_id,
+                tca_menu_item_id: body.tca_menu_item_id,
+                tca_type: body.type ?? "menu_item",
+              },
+              variants: [
+                {
+                  id: variantId,
+                  manage_inventory: inventoryFlags.manage_inventory,
+                  allow_backorder: inventoryFlags.allow_backorder,
+                  prices: [
+                    {
+                      amount: priceMinorUnits,
+                      currency_code: normalizedCurrency,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      })
     }
 
     const tcaSvc = req.scope.resolve(
@@ -162,7 +206,10 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       await ensureProductTcaCompanyLink(req.scope, productId, tcaRow.id)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      await tcaSvc.recordSyncError(body.tca_company_id, `link_failed: ${message}`)
+      await tcaSvc.recordSyncError(
+        body.tca_company_id,
+        `link_failed: ${message}`
+      )
       return res.status(502).json({
         message:
           "Product was created/updated in Medusa but linking to TCA company failed. Retry sync to repair.",
@@ -196,7 +243,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     const errMsg = e instanceof Error ? e.message : String(e)
     console.error("[tca-sync] Sync failed", { error: errMsg, handle })
     return res.status(502).json({
-      message: "Failed syncing product to Medusa Cloud.",
+      message: "Failed syncing product to Medusa.",
       error: errMsg,
     })
   }
@@ -208,10 +255,10 @@ function buildHandle(companyId: string, menuItemId: string) {
   return `tca-${normalizedCompany}-${normalizedItem}`.slice(0, 180)
 }
 
-function mapInventoryToVariantFlags(inventoryEnabled: boolean, trackInventory: boolean) {
-  // TCA mapping rule:
-  // - inventory_enabled -> manage_inventory
-  // - track_inventory=false -> allow backorders
+function mapInventoryToVariantFlags(
+  inventoryEnabled: boolean,
+  trackInventory: boolean
+) {
   if (!inventoryEnabled) {
     return { manage_inventory: false, allow_backorder: true }
   }
@@ -219,238 +266,4 @@ function mapInventoryToVariantFlags(inventoryEnabled: boolean, trackInventory: b
     return { manage_inventory: false, allow_backorder: true }
   }
   return { manage_inventory: true, allow_backorder: false }
-}
-
-async function fetchProductMetadata(
-  baseUrl: string,
-  token: string,
-  productId: string
-): Promise<Record<string, unknown> | undefined> {
-  const query = new URLSearchParams({
-    fields: "id,metadata",
-  }).toString()
-  const json = await requestWithRetry<{
-    product?: { metadata?: Record<string, unknown> }
-  }>({
-    method: "GET",
-    url: `${baseUrl.replace(/\/$/, "")}/admin/products/${productId}?${query}`,
-    token,
-  })
-  return json.product?.metadata
-}
-
-async function findByHandle(
-  baseUrl: string,
-  token: string,
-  handle: string
-): Promise<AdminProduct | null> {
-  const query = new URLSearchParams({ handle, limit: "1" }).toString()
-  const json = await requestWithRetry<{
-    products?: Array<AdminProduct>
-  }>({
-    method: "GET",
-    url: `${baseUrl.replace(/\/$/, "")}/admin/products?${query}`,
-    token,
-  })
-  const products = json.products || []
-  return products.length > 0 ? products[0] : null
-}
-
-async function createProduct(
-  baseUrl: string,
-  token: string,
-  input: {
-    title: string
-    handle: string
-    type?: string
-    priceMinorUnits: number
-    normalizedCurrency: string
-    inventoryEnabled: boolean
-    trackInventory: boolean
-    quantity: number
-    isOrderable: boolean
-    tcaCompanyId: string
-    tcaMenuItemId: string
-  }
-): Promise<{ productId: string; variantId: string }> {
-  const inventoryFlags = mapInventoryToVariantFlags(
-    input.inventoryEnabled,
-    input.trackInventory
-  )
-  const payload: Record<string, unknown> = {
-    title: input.title,
-    handle: input.handle,
-    status: input.isOrderable ? "published" : "draft",
-    metadata: {
-      tca_company_id: input.tcaCompanyId,
-      tca_menu_item_id: input.tcaMenuItemId,
-      tca_type: input.type ?? "menu_item",
-    },
-    options: [{ title: "Default" }],
-    variants: [
-      {
-        title: "Default",
-        options: { Default: "Default" },
-        manage_inventory: inventoryFlags.manage_inventory,
-        allow_backorder: inventoryFlags.allow_backorder,
-        inventory_quantity:
-          input.inventoryEnabled && input.trackInventory ? input.quantity : undefined,
-        prices: [
-          {
-            amount: input.priceMinorUnits,
-            currency_code: input.normalizedCurrency,
-          },
-        ],
-      },
-    ],
-  }
-
-  const json = await requestWithRetry<{
-    product?: AdminProduct
-  }>({
-    method: "POST",
-    url: `${baseUrl.replace(/\/$/, "")}/admin/products`,
-    token,
-    body: payload,
-  })
-  const productId = json.product?.id
-  const variantId = json.product?.variants?.[0]?.id
-  if (!productId || !variantId) {
-    throw new Error("Product created but product/variant ID missing in response.")
-  }
-  return { productId, variantId }
-}
-
-async function updateProduct(
-  baseUrl: string,
-  token: string,
-  existing: AdminProduct,
-  input: {
-    title: string
-    type?: string
-    priceMinorUnits: number
-    normalizedCurrency: string
-    inventoryEnabled: boolean
-    trackInventory: boolean
-    quantity: number
-    isOrderable: boolean
-    tcaCompanyId: string
-    tcaMenuItemId: string
-  }
-): Promise<{ productId: string; variantId: string }> {
-  const variantId = existing.variants?.[0]?.id
-  if (!existing.id || !variantId) {
-    throw new Error("Existing product missing variant to update.")
-  }
-
-  // Update product shell (title/status/metadata)
-  await requestWithRetry({
-    method: "POST",
-    url: `${baseUrl.replace(/\/$/, "")}/admin/products/${existing.id}`,
-    token,
-    body: {
-      title: input.title,
-      status: input.isOrderable ? "published" : "draft",
-      metadata: {
-        tca_company_id: input.tcaCompanyId,
-        tca_menu_item_id: input.tcaMenuItemId,
-        tca_type: input.type ?? "menu_item",
-      },
-    },
-  })
-
-  const inventoryFlags = mapInventoryToVariantFlags(
-    input.inventoryEnabled,
-    input.trackInventory
-  )
-
-  // Update variant-level availability/inventory/price.
-  await requestWithRetry({
-    method: "POST",
-    url: `${baseUrl.replace(/\/$/, "")}/admin/products/${existing.id}/variants/${variantId}`,
-    token,
-    body: {
-      manage_inventory: inventoryFlags.manage_inventory,
-      allow_backorder: inventoryFlags.allow_backorder,
-      inventory_quantity:
-        input.inventoryEnabled && input.trackInventory ? input.quantity : undefined,
-      prices: [
-        {
-          amount: input.priceMinorUnits,
-          currency_code: input.normalizedCurrency,
-        },
-      ],
-    },
-  })
-
-  return { productId: existing.id, variantId }
-}
-
-async function requestWithRetry<T = unknown>(args: {
-  method: "GET" | "POST"
-  url: string
-  token: string
-  body?: Record<string, unknown>
-}): Promise<T> {
-  let attempt = 0
-  let backoffMs = INITIAL_BACKOFF_MS
-  let lastError: Error | null = null
-
-  console.log(`[tca-sync] ${args.method} ${args.url}`, {
-    tokenPrefix: args.token.slice(0, 8) + "...",
-    hasBody: !!args.body,
-  })
-
-  while (attempt < MAX_RETRIES) {
-    attempt += 1
-    try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-      const response = await fetch(args.url, {
-        method: args.method,
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${args.token}`,
-        },
-        body: args.body ? JSON.stringify(args.body) : undefined,
-        signal: controller.signal,
-      })
-      clearTimeout(timeout)
-
-      if (response.ok) {
-        const text = await response.text()
-        console.log(`[tca-sync] ${args.method} ${args.url} -> ${response.status} OK`)
-        return (text ? JSON.parse(text) : {}) as T
-      }
-
-      const bodyText = await response.text()
-      console.error(`[tca-sync] ${args.method} ${args.url} -> ${response.status}`, {
-        attempt,
-        responseBody: bodyText.slice(0, 500),
-        responseHeaders: Object.fromEntries(response.headers.entries()),
-      })
-      const isRetryable = response.status >= 500 || response.status === 429
-      const error = new Error(
-        `Medusa request failed (${response.status}): ${bodyText || "empty response"}`
-      )
-      lastError = error
-      if (!isRetryable || attempt >= MAX_RETRIES) {
-        throw error
-      }
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e))
-      if (attempt >= MAX_RETRIES) {
-        break
-      }
-    }
-
-    await sleep(backoffMs)
-    backoffMs *= 2
-  }
-
-  throw lastError ?? new Error("Unknown Medusa request failure.")
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
