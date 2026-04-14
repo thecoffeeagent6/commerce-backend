@@ -12,7 +12,10 @@ type SyncBody = {
   tca_company_id: string
   tca_menu_item_id: string
   title: string
+  description?: string | null
+  image_url?: string | null
   type?: string
+  category_name?: string | null
   price_amount?: number
   currency_code?: string
   inventory_enabled?: boolean
@@ -59,6 +62,9 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const isOrderable = body.is_orderable === true
   const handle = buildHandle(body.tca_company_id, body.tca_menu_item_id)
   const title = body.title.trim()
+  const description = body.description?.trim() || undefined
+  const imageUrl = body.image_url?.trim() || undefined
+  const categoryName = body.category_name?.trim() || undefined
 
   try {
     const productService: any = req.scope.resolve(Modules.PRODUCT)
@@ -102,11 +108,17 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
           {
             title,
             handle,
+            description: description ?? "",
+            subtitle: categoryName ?? "",
             status: isOrderable ? ("published" as const) : ("draft" as const),
+            thumbnail: imageUrl ?? undefined,
+            images: imageUrl ? [{ url: imageUrl }] : undefined,
             metadata: {
               tca_company_id: body.tca_company_id,
               tca_menu_item_id: body.tca_menu_item_id,
               tca_type: body.type ?? "menu_item",
+              tca_category: categoryName ?? null,
+              tca_image_url: imageUrl ?? null,
             },
             options: [{ title: "Default", values: ["Default"] }],
             variants: [
@@ -172,11 +184,18 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
             {
               id: existing.id,
               title,
-              status: isOrderable ? "published" : "draft",
+              description: description ?? "",
+              subtitle: categoryName ?? "",
+              status: isOrderable ? ("published" as const) : ("draft" as const),
+              thumbnail: imageUrl ?? undefined,
+              images: imageUrl ? [{ url: imageUrl }] : undefined,
               metadata: {
+                ...(existing.metadata ?? {}),
                 tca_company_id: body.tca_company_id,
                 tca_menu_item_id: body.tca_menu_item_id,
                 tca_type: body.type ?? "menu_item",
+                tca_category: categoryName ?? null,
+                tca_image_url: imageUrl ?? null,
               },
               variants: [
                 {
@@ -218,6 +237,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       })
     }
 
+    let linkOk = false
     try {
       console.log("[tca-sync] Linking product to TCA company", {
         productId,
@@ -225,25 +245,11 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
         externalCompanyId: body.tca_company_id,
       })
       await ensureProductTcaCompanyLink(req.scope, productId, tcaRow.id)
+      linkOk = true
       console.log("[tca-sync] Link created successfully")
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      const stack = e instanceof Error ? e.stack : undefined
-      const detail = typeof e === "object" && e !== null && !(e instanceof Error)
-        ? JSON.stringify(e, null, 2)
-        : undefined
-      console.error("[tca-sync] Link failed", { message, stack, detail })
-      await tcaSvc.recordSyncError(
-        body.tca_company_id,
-        `link_failed: ${message}`
-      )
-      return res.status(502).json({
-        message:
-          "Product was created/updated in Medusa but linking to TCA company failed. Retry sync to repair.",
-        error: message,
-        productId,
-        variantId,
-      })
+      console.warn("[tca-sync] Link failed (non-fatal, metadata tracks relationship)", message)
     }
 
     console.log("[tca-sync] Success", {
@@ -251,6 +257,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       productId,
       variantId,
       tca_company_record_id: tcaRow.id,
+      linkOk,
     })
 
     return res.status(200).json({
@@ -259,6 +266,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       variantId,
       tca_company_record_id: tcaRow.id,
       mode: existing ? "updated" : "created",
+      linkOk,
       inventory: {
         inventory_enabled: inventoryEnabled,
         track_inventory: trackInventory,
