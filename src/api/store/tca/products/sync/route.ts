@@ -219,9 +219,20 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     }
 
     try {
+      console.log("[tca-sync] Linking product to TCA company", {
+        productId,
+        tcaCompanyInternalId: tcaRow.id,
+        externalCompanyId: body.tca_company_id,
+      })
       await ensureProductTcaCompanyLink(req.scope, productId, tcaRow.id)
+      console.log("[tca-sync] Link created successfully")
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
+      const stack = e instanceof Error ? e.stack : undefined
+      const detail = typeof e === "object" && e !== null && !(e instanceof Error)
+        ? JSON.stringify(e, null, 2)
+        : undefined
+      console.error("[tca-sync] Link failed", { message, stack, detail })
       await tcaSvc.recordSyncError(
         body.tca_company_id,
         `link_failed: ${message}`
