@@ -30,16 +30,27 @@ const INITIAL_BACKOFF_MS = 400
 
 export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const body = req.body
+
+  console.log("[tca-sync] POST /store/tca/products/sync called", {
+    tca_company_id: body?.tca_company_id ?? "(missing)",
+    tca_menu_item_id: body?.tca_menu_item_id ?? "(missing)",
+    title: body?.title ?? "(missing)",
+  })
+
   const publishableKey = process.env.MEDUSA_PUBLISHABLE_KEY ?? ""
   const receivedPk =
     (req.headers["x-publishable-api-key"] as string | undefined) ?? ""
 
-  // If configured, enforce publishable key presence and match.
   if (publishableKey && receivedPk.trim() != publishableKey.trim()) {
+    console.warn("[tca-sync] Publishable key mismatch", {
+      expected_prefix: publishableKey.slice(0, 8) + "...",
+      received_prefix: receivedPk.slice(0, 8) + "...",
+    })
     return res.status(401).json({ message: "Invalid publishable API key." })
   }
 
   if (!body?.tca_company_id || !body?.tca_menu_item_id || !body?.title) {
+    console.warn("[tca-sync] Missing required fields in body")
     return res.status(400).json({
       message: "Missing required fields: tca_company_id, tca_menu_item_id, title.",
     })
@@ -48,11 +59,22 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const medusaBaseUrl = process.env.MEDUSA_BASE_URL || process.env.MEDUSA_BACKEND_URL
   const adminToken = process.env.MEDUSA_ADMIN_API_TOKEN || process.env.MEDUSA_API_TOKEN
   if (!medusaBaseUrl || !adminToken) {
+    console.error("[tca-sync] Env vars missing!", {
+      MEDUSA_BASE_URL: process.env.MEDUSA_BASE_URL ? "set" : "MISSING",
+      MEDUSA_BACKEND_URL: process.env.MEDUSA_BACKEND_URL ? "set" : "MISSING",
+      MEDUSA_ADMIN_API_TOKEN: process.env.MEDUSA_ADMIN_API_TOKEN ? "set" : "MISSING",
+      MEDUSA_API_TOKEN: process.env.MEDUSA_API_TOKEN ? "set" : "MISSING",
+    })
     return res.status(500).json({
       message:
         "Missing MEDUSA_BASE_URL/MEDUSA_BACKEND_URL or MEDUSA_ADMIN_API_TOKEN in environment.",
     })
   }
+
+  console.log("[tca-sync] Env OK", {
+    baseUrl: medusaBaseUrl.slice(0, 30) + "...",
+    tokenPrefix: adminToken.slice(0, 6) + "...",
+  })
 
   const normalizedCurrency = (body.currency_code || "usd").toLowerCase()
   const priceMinorUnits = Math.max(0, Math.round((body.price_amount ?? 0) * 100))
@@ -150,6 +172,13 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       })
     }
 
+    console.log("[tca-sync] Success", {
+      mode: existing ? "updated" : "created",
+      productId,
+      variantId,
+      tca_company_record_id: tcaRow.id,
+    })
+
     return res.status(200).json({
       success: true,
       productId,
@@ -164,9 +193,11 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       },
     })
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e)
+    console.error("[tca-sync] Sync failed", { error: errMsg, handle })
     return res.status(502).json({
       message: "Failed syncing product to Medusa Cloud.",
-      error: e instanceof Error ? e.message : String(e),
+      error: errMsg,
     })
   }
 }
