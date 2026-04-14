@@ -396,6 +396,11 @@ async function requestWithRetry<T = unknown>(args: {
   let backoffMs = INITIAL_BACKOFF_MS
   let lastError: Error | null = null
 
+  console.log(`[tca-sync] ${args.method} ${args.url}`, {
+    tokenPrefix: args.token.slice(0, 8) + "...",
+    hasBody: !!args.body,
+  })
+
   while (attempt < MAX_RETRIES) {
     attempt += 1
     try {
@@ -414,10 +419,16 @@ async function requestWithRetry<T = unknown>(args: {
 
       if (response.ok) {
         const text = await response.text()
+        console.log(`[tca-sync] ${args.method} ${args.url} -> ${response.status} OK`)
         return (text ? JSON.parse(text) : {}) as T
       }
 
       const bodyText = await response.text()
+      console.error(`[tca-sync] ${args.method} ${args.url} -> ${response.status}`, {
+        attempt,
+        responseBody: bodyText.slice(0, 500),
+        responseHeaders: Object.fromEntries(response.headers.entries()),
+      })
       const isRetryable = response.status >= 500 || response.status === 429
       const error = new Error(
         `Medusa request failed (${response.status}): ${bodyText || "empty response"}`
