@@ -276,9 +276,11 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
 }
 
 function buildHandle(companyId: string, menuItemId: string) {
-  const normalizedCompany = companyId.toLowerCase().replace(/[^a-z0-9_-]/g, "-")
-  const normalizedItem = menuItemId.toLowerCase().replace(/[^a-z0-9_-]/g, "-")
-  return `tca-${normalizedCompany}-${normalizedItem}`.slice(0, 180)
+  const normalizedCompany = companyId.toLowerCase().replace(/[^a-z0-9-]/g, "-")
+  const normalizedItem = menuItemId.toLowerCase().replace(/[^a-z0-9-]/g, "-")
+  return `tca-${normalizedCompany}-${normalizedItem}`
+    .replace(/-{2,}/g, "-")
+    .slice(0, 180)
 }
 
 function mapInventoryToVariantFlags(
