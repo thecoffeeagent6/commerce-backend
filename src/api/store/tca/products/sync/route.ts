@@ -30,6 +30,7 @@ type SyncBody = {
   is_gluten_free?: boolean
   allergens?: string[] | null
   ingredients?: string[] | null
+  sales_channel_id?: string | null
 }
 
 export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
@@ -71,6 +72,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const isOrderable = body.is_orderable === true
   const handle = buildHandle(body.tca_company_id, body.tca_menu_item_id)
   const title = body.title.trim()
+  const salesChannelId = body.sales_channel_id?.trim() || undefined
 
   try {
     const productService: any = req.scope.resolve(Modules.PRODUCT)
@@ -138,6 +140,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
             thumbnail: imageUrl ?? "",
             images: imageUrl ? [{ url: imageUrl }] : [],
             collection_id: collectionId ?? undefined,
+            ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
             metadata: productMetadata,
             options: [{ title: "Default", values: ["Default"] }],
             variants: [
