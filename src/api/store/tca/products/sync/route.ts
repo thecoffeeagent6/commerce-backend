@@ -4,6 +4,7 @@ import {
   createProductsWorkflow,
   updateProductsWorkflow,
   createCollectionsWorkflow,
+  linkProductsToSalesChannelWorkflow,
 } from "@medusajs/medusa/core-flows"
 import TcaCompanyModuleService from "../../../../../modules/tca_company/service"
 import { TCA_COMPANY_MODULE } from "../../../../../modules/tca_company/constants"
@@ -72,9 +73,22 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
   const isOrderable = body.is_orderable === true
   const handle = buildHandle(body.tca_company_id, body.tca_menu_item_id)
   const title = body.title.trim()
-  const salesChannelId = body.sales_channel_id?.trim() || undefined
 
   try {
+    const tcaSvc = req.scope.resolve(TCA_COMPANY_MODULE) as TcaCompanyModuleService
+    const tcaCompanyRow = await tcaSvc.retrieveByExternalCompanyId(body.tca_company_id.trim())
+    const resolvedSalesChannelId =
+      body.sales_channel_id?.trim() ||
+      tcaCompanyRow?.medusa_sales_channel_id?.trim() ||
+      undefined
+
+    if (!resolvedSalesChannelId) {
+      console.warn(
+        "[tca-sync] No sales_channel_id on body and no medusa_sales_channel_id on TCA company; " +
+          "product may not be addable to carts scoped to a sales channel until provision completes."
+      )
+    }
+
     const productService: any = req.scope.resolve(Modules.PRODUCT)
 
     // ── Find or create a Medusa collection for this company ──
@@ -140,7 +154,9 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
             thumbnail: imageUrl ?? "",
             images: imageUrl ? [{ url: imageUrl }] : [],
             collection_id: collectionId ?? undefined,
-            ...(salesChannelId ? { sales_channels: [{ id: salesChannelId }] } : {}),
+            ...(resolvedSalesChannelId
+              ? { sales_channels: [{ id: resolvedSalesChannelId }] }
+              : {}),
             metadata: productMetadata,
             options: [{ title: "Default", values: ["Default"] }],
             variants: [
@@ -218,9 +234,27 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       })
     }
 
-    // ── Upsert TCA company record ──
-    const tcaSvc = req.scope.resolve(TCA_COMPANY_MODULE) as TcaCompanyModuleService
+    // Ensure product is available on the company sales channel (required for store cart line-items).
+    if (resolvedSalesChannelId && productId) {
+      try {
+        await linkProductsToSalesChannelWorkflow(req.scope).run({
+          input: {
+            id: resolvedSalesChannelId,
+            add: [productId],
+            remove: [],
+          },
+        })
+        console.log("[tca-sync] Linked product to sales channel", {
+          productId,
+          salesChannelId: resolvedSalesChannelId,
+        })
+      } catch (linkErr) {
+        const msg = linkErr instanceof Error ? linkErr.message : String(linkErr)
+        console.warn("[tca-sync] linkProductsToSalesChannelWorkflow failed (non-fatal)", msg)
+      }
+    }
 
+    // ── Upsert TCA company record ──
     let tcaRow
     try {
       tcaRow = await tcaSvc.upsertByExternalCompanyId({
