@@ -1,8 +1,37 @@
 import type { MedusaContainer } from "@medusajs/types"
-import { ContainerRegistrationKeys, Modules } from "@medusajs/utils"
+import {
+  ContainerRegistrationKeys,
+  Modules,
+  remoteQueryObjectFromString,
+} from "@medusajs/framework/utils"
 import { TCA_COMPANY_MODULE } from "./constants"
 
 export type MedusaScope = MedusaContainer
+
+async function fetchProductTcaCompanyLinkRow(
+  container: MedusaScope,
+  productId: string,
+): Promise<{ product_id: string; tca_company_id: string } | null> {
+  const remoteQuery = container.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
+  const queryObject = remoteQueryObjectFromString({
+    entryPoint: "product_tca_company",
+    variables: { filters: { product_id: productId } },
+    fields: ["product_id", "tca_company_id"],
+  })
+  const rows = await remoteQuery(queryObject)
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (
+    row &&
+    typeof row.tca_company_id === "string" &&
+    row.tca_company_id.length > 0
+  ) {
+    return {
+      product_id: String(row.product_id ?? productId),
+      tca_company_id: row.tca_company_id,
+    }
+  }
+  return null
+}
 
 /**
  * Ensures the product is linked to exactly one TcaCompany (internal Medusa id).
@@ -14,25 +43,17 @@ export async function ensureProductTcaCompanyLink(
   tcaCompanyId: string
 ): Promise<void> {
   const link = container.resolve(ContainerRegistrationKeys.LINK)
+  const existing = await fetchProductTcaCompanyLinkRow(container, productId)
+  const currentLinkedId = existing?.tca_company_id
 
-  const existing = await link.list(
-    {
-      [Modules.PRODUCT]: {
-        product_id: productId,
-      },
-    },
-    { asLinkDefinition: true }
-  )
-
-  for (const entry of existing as Array<Record<string, Record<string, string>>>) {
-    const tcaSide = entry[TCA_COMPANY_MODULE]
-    const currentLinkedId = tcaSide?.tca_company_id
-    if (currentLinkedId === tcaCompanyId) {
-      return
-    }
-    if (currentLinkedId) {
-      await link.dismiss(entry)
-    }
+  if (currentLinkedId === tcaCompanyId) {
+    return
+  }
+  if (currentLinkedId) {
+    await link.dismiss({
+      [Modules.PRODUCT]: { product_id: productId },
+      [TCA_COMPANY_MODULE]: { tca_company_id: currentLinkedId },
+    })
   }
 
   await link.create({
@@ -46,18 +67,6 @@ export async function getTcaCompanyIdForProduct(
   container: MedusaScope,
   productId: string
 ): Promise<string | null> {
-  const link = container.resolve(ContainerRegistrationKeys.LINK)
-  const rows = await link.list(
-    {
-      [Modules.PRODUCT]: { product_id: productId },
-    },
-    { asLinkDefinition: true }
-  )
-  for (const entry of rows as Array<Record<string, Record<string, string>>>) {
-    const id = entry[TCA_COMPANY_MODULE]?.tca_company_id
-    if (id) {
-      return id
-    }
-  }
-  return null
+  const row = await fetchProductTcaCompanyLinkRow(container, productId)
+  return row?.tca_company_id ?? null
 }

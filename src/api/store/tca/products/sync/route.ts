@@ -112,6 +112,16 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
       }
     }
 
+    // Store money amounts in the cart region currency *and* the menu currency when they differ so
+    // pricing can resolve calculated_price for pickup carts (avoids core-flows crash on
+    // calculatedPriceSet.calculated_amount when only one currency was synced).
+    const menuCurrencyForPrices = (body.currency_code || "").toLowerCase().trim()
+    const variantPrices = buildVariantPriceRows(
+      priceMinorUnits,
+      normalizedCurrency,
+      menuCurrencyForPrices || null,
+    )
+
     const productService: any = req.scope.resolve(Modules.PRODUCT)
 
     // ── Find or create a Medusa collection for this company ──
@@ -188,7 +198,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
                 options: { Default: "Default" },
                 manage_inventory: inventoryFlags.manage_inventory,
                 allow_backorder: inventoryFlags.allow_backorder,
-                prices: [{ amount: priceMinorUnits, currency_code: normalizedCurrency }],
+                prices: variantPrices,
               },
             ],
           },
@@ -248,7 +258,7 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
                   id: variantId,
                   manage_inventory: inventoryFlags.manage_inventory,
                   allow_backorder: inventoryFlags.allow_backorder,
-                  prices: [{ amount: priceMinorUnits, currency_code: normalizedCurrency }],
+                  prices: variantPrices,
                 },
               ],
             },
@@ -372,6 +382,21 @@ function buildHandle(companyId: string, menuItemId: string) {
 function mapInventoryToVariantFlags(inventoryEnabled: boolean, trackInventory: boolean) {
   if (!inventoryEnabled || !trackInventory) return { manage_inventory: false, allow_backorder: true }
   return { manage_inventory: true, allow_backorder: false }
+}
+
+function buildVariantPriceRows(
+  amountMinor: number,
+  primaryCurrency: string,
+  menuCurrency: string | null,
+): { amount: number; currency_code: string }[] {
+  const primary = primaryCurrency.toLowerCase()
+  const rows: { amount: number; currency_code: string }[] = [
+    { amount: amountMinor, currency_code: primary },
+  ]
+  if (menuCurrency && menuCurrency !== primary) {
+    rows.push({ amount: amountMinor, currency_code: menuCurrency })
+  }
+  return rows
 }
 
 async function resolveRegionCurrency(
