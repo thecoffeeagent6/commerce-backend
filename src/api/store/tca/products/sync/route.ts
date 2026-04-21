@@ -1,5 +1,9 @@
 import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
-import { Modules } from "@medusajs/framework/utils"
+import {
+  ContainerRegistrationKeys,
+  Modules,
+  remoteQueryObjectFromString,
+} from "@medusajs/framework/utils"
 import {
   createProductsWorkflow,
   updateProductsWorkflow,
@@ -65,7 +69,6 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
     })
   }
 
-  const normalizedCurrency = (body.currency_code || "usd").toLowerCase()
   const priceMinorUnits = Math.max(0, Math.round((body.price_amount ?? 0) * 100))
   const quantity = Math.max(0, Number(body.inventory_quantity ?? 0))
   const inventoryEnabled = body.inventory_enabled === true
@@ -87,6 +90,26 @@ export async function POST(req: MedusaRequest<SyncBody>, res: MedusaResponse) {
         "[tca-sync] No sales_channel_id on body and no medusa_sales_channel_id on TCA company; " +
           "product may not be addable to carts scoped to a sales channel until provision completes."
       )
+    }
+
+    // Cart pricing resolves variant.calculated_price in the cart region's currency. If we only store
+    // a price in a different currency (e.g. menu AED vs region USD), calculated_price is missing and
+    // Medusa throws (e.g. "Cannot read properties of undefined (reading 'calculated_amount')").
+    let normalizedCurrency = (body.currency_code || "usd").toLowerCase()
+    const regionIdForPrice = tcaCompanyRow?.medusa_default_region_id?.trim()
+    if (regionIdForPrice) {
+      const regionCurrency = await resolveRegionCurrency(req.scope, regionIdForPrice)
+      if (regionCurrency) {
+        const menuCur = (body.currency_code || "").toLowerCase().trim()
+        if (menuCur && menuCur !== regionCurrency) {
+          console.warn(
+            "[tca-sync] Menu currency differs from Medusa default region currency; " +
+              "using region currency for variant price so checkout can compute line totals.",
+            { menuCurrency: menuCur, regionCurrency, regionId: regionIdForPrice },
+          )
+        }
+        normalizedCurrency = regionCurrency
+      }
     }
 
     const productService: any = req.scope.resolve(Modules.PRODUCT)
@@ -349,4 +372,27 @@ function buildHandle(companyId: string, menuItemId: string) {
 function mapInventoryToVariantFlags(inventoryEnabled: boolean, trackInventory: boolean) {
   if (!inventoryEnabled || !trackInventory) return { manage_inventory: false, allow_backorder: true }
   return { manage_inventory: true, allow_backorder: false }
+}
+
+async function resolveRegionCurrency(
+  scope: any,
+  regionId: string,
+): Promise<string | null> {
+  try {
+    const remoteQuery = scope.resolve(ContainerRegistrationKeys.REMOTE_QUERY)
+    const queryObject = remoteQueryObjectFromString({
+      entryPoint: "region",
+      variables: { filters: { id: regionId } },
+      fields: ["id", "currency_code"],
+    })
+    const rows = await remoteQuery(queryObject)
+    const row = Array.isArray(rows) ? rows[0] : null
+    const cc = row?.currency_code
+    if (cc && typeof cc === "string") {
+      return cc.toLowerCase()
+    }
+  } catch (e) {
+    console.warn("[tca-sync] resolveRegionCurrency failed", e)
+  }
+  return null
 }
