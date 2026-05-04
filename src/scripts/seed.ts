@@ -118,7 +118,9 @@ export default async function seedDemoData({ container }: ExecArgs) {
           name: "Europe",
           currency_code: "eur",
           countries,
-          payment_providers: ["pp_system_default"],
+          // `pp_stripe_stripe` = basic card payments from @medusajs/payment-stripe (see Medusa Stripe docs).
+          // Regions must list providers here or enable Stripe in Admin → Settings → Regions.
+          payment_providers: ["pp_system_default", "pp_stripe_stripe"],
         },
       ],
     },
