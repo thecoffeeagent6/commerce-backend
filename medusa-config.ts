@@ -17,5 +17,12 @@ module.exports = defineConfig({
     {
       resolve: "./src/modules/tca_company",
     },
+    {
+      resolve: "@medusajs/payment-stripe",
+      options: {
+        apiKey: process.env.STRIPE_SECRET_KEY,
+        webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      },
+    },
   ],
 })
