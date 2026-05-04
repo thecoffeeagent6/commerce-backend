@@ -343,7 +343,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
     },
   });
 
-  publishableApiKey = data?.[0];
+  publishableApiKey = (data?.[0] as ApiKeyDTO | undefined) ?? null;
 
   if (!publishableApiKey) {
     const {

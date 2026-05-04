@@ -18,10 +18,21 @@ module.exports = defineConfig({
       resolve: "./src/modules/tca_company",
     },
     {
-      resolve: "@medusajs/payment-stripe",
+      // Register Stripe as a *payment provider* on the Payment module (not a top-level module).
+      // Top-level `@medusajs/payment-stripe` is a ModuleProvider and breaks `defineConfig` module resolution.
+      key: "payment",
+      resolve: "@medusajs/medusa/payment",
       options: {
-        apiKey: process.env.STRIPE_SECRET_KEY,
-        webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+        providers: [
+          {
+            resolve: "@medusajs/medusa/payment-stripe",
+            id: "stripe",
+            options: {
+              apiKey: process.env.STRIPE_SECRET_KEY,
+              webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+            },
+          },
+        ],
       },
     },
   ],
