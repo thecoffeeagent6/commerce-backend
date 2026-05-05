@@ -2,6 +2,11 @@ import { loadEnv, defineConfig } from '@medusajs/framework/utils'
 
 loadEnv(process.env.NODE_ENV || 'development', process.cwd())
 
+/** Stripe secret key (sk_...). Set in Medusa Cloud secrets / env: STRIPE_SECRET_KEY (or STRIPE_API_KEY). */
+const stripeSecretKey =
+  process.env.STRIPE_SECRET_KEY?.trim() ||
+  process.env.STRIPE_API_KEY?.trim()
+
 module.exports = defineConfig({
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
@@ -28,8 +33,10 @@ module.exports = defineConfig({
             resolve: "@medusajs/medusa/payment-stripe",
             id: "stripe",
             options: {
-              apiKey: process.env.STRIPE_SECRET_KEY,
-              webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+              apiKey: stripeSecretKey,
+              ...(process.env.STRIPE_WEBHOOK_SECRET
+                ? { webhookSecret: process.env.STRIPE_WEBHOOK_SECRET }
+                : {}),
             },
           },
         ],
